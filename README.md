@@ -23,7 +23,7 @@ A few useful scripts. Pass `--help` to a script for its options.
 
 - [`clash_install.sh`](clash_install.sh) downloads a Clash binary, gunzips it, and marks it executable.
 - [`clash_switch.sh`](clash_switch.sh) turns on the Clash HTTP API if needed and switches the active node in a proxy group.
-- [`clash-tunnel.sh`](clash-tunnel.sh) opens an SSH remote forward from a server to the local Clash proxy and records the allocated port.
+- [`clash-tunnel.sh`](clash-tunnel.sh) opens an SSH remote forward from a server to the local Clash proxy and records the allocated port; remote file ops use `/bin/sh` (login shell may be Fish or Zsh).
 - [`frp_auto_restart.sh`](frp_auto_restart.sh) checks the frpc connection to an FRP server and restarts frpc when it is down.
 
 ## Repos and files

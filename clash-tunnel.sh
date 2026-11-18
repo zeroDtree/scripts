@@ -10,6 +10,10 @@
 # port is written to the remote port file (mode 600).
 # Running up again reuses that port while the forward is still listening.
 #
+# Remote host: port-file and listen checks run under /bin/sh (via exec),
+# not the login shell, so Fish or Zsh as default shell is fine.
+# Remote /bin/sh is required. Listen checks prefer nc, else bash /dev/tcp.
+#
 # Env: CLASH_PORT_FILE — remote path that stores the allocated port.
 #   A leading ~ is the remote user's home. Example:
 #   CLASH_PORT_FILE=~/.config/clash-proxy-port ./clash-tunnel.sh -s USER@HOST
@@ -175,34 +179,59 @@ ensure_master() {
     "${server}" || die "failed to open the SSH control connection to ${server}"
 }
 
-# First stdin line is the remote port-file path. ~ and ~/ expand there.
-port_file_setup='IFS= read -r port_file || exit 1
+# $1 is the remote port-file path; expand ~ and ~/ on the server.
+port_file_setup='port_file="$1"
 case "$port_file" in
   "~") port_file="$HOME" ;;
   "~/"*) port_file="$HOME/${port_file#"~/"}" ;;
 esac
 '
 
+remote_listen_script='port="$1"
+if command -v nc >/dev/null 2>&1; then
+  if nc -z -G 1 127.0.0.1 "$port" 2>/dev/null; then
+    exit 0
+  fi
+  if nc -z -w 1 127.0.0.1 "$port" 2>/dev/null; then
+    exit 0
+  fi
+fi
+if command -v bash >/dev/null 2>&1; then
+  if bash -c "echo >/dev/tcp/127.0.0.1/${port}" 2>/dev/null; then
+    exit 0
+  fi
+fi
+exit 1
+'
+
+ssh_run_sh() {
+  local runner="$1"
+  local remote_script="$2"
+  shift 2
+  local -a remote_argv=(exec /bin/sh -s -- "$@")
+
+  if [ "${runner}" = "mux" ]; then
+    ssh_mux "${server}" "${remote_argv[@]}" <<EOF
+${remote_script}
+EOF
+  else
+    ssh_once "${server}" "${remote_argv[@]}" <<EOF
+${remote_script}
+EOF
+  fi
+}
+
 ssh_port_file() {
   local runner="$1"
   local remote_body="$2"
   local extra="${3-}"
-  local remote_cmd="${port_file_setup}${remote_body}"
+  local full_script="${port_file_setup}
+${remote_body}"
 
-  if [ "${runner}" = "mux" ]; then
-    {
-      printf '%s\n' "${port_file}"
-      if [ -n "${extra}" ]; then
-        printf '%s\n' "${extra}"
-      fi
-    } | ssh_mux "${server}" "${remote_cmd}"
+  if [ -n "${extra}" ]; then
+    ssh_run_sh "${runner}" "${full_script}" "${port_file}" "${extra}"
   else
-    {
-      printf '%s\n' "${port_file}"
-      if [ -n "${extra}" ]; then
-        printf '%s\n' "${extra}"
-      fi
-    } | ssh_once "${server}" "${remote_cmd}"
+    ssh_run_sh "${runner}" "${full_script}" "${port_file}"
   fi
 }
 
@@ -218,13 +247,8 @@ fetch_remote_port() {
 remote_listening() {
   local port="$1"
   local runner="${2:-mux}"
-  local probe="bash -c 'echo >/dev/tcp/127.0.0.1/${port}'"
 
-  if [ "${runner}" = "mux" ]; then
-    ssh_mux "${server}" "${probe}" >/dev/null 2>&1
-  else
-    ssh_once "${server}" "${probe}" >/dev/null 2>&1
-  fi
+  ssh_run_sh "${runner}" "${remote_listen_script}" "${port}" >/dev/null 2>&1
 }
 
 parse_allocated_port() {
@@ -248,8 +272,8 @@ parse_allocated_port() {
 
 write_remote_port() {
   ssh_port_file mux \
-    'mkdir -p "$(dirname "$port_file")" && cat > "$port_file" && chmod 600 "$port_file"' \
-    "$1" || die "failed to write the remote port file"
+    'mkdir -p "$(dirname "$port_file")" && printf "%s\n" "$2" > "$port_file" && chmod 600 "$port_file"' \
+    "$1"
 }
 
 cancel_forward() {
@@ -305,20 +329,31 @@ cmd_up() {
     die "remote port allocation failed: ${output:-no port in ssh output}"
   fi
   port="$(parse_allocated_port "${output}")" || die "remote port allocation failed: ${output:-no port in ssh output}"
-  write_remote_port "${port}"
+  if ! write_remote_port "${port}"; then
+    cancel_forward "${port}"
+    die "failed to write the remote port file"
+  fi
   print_tunnel "${port}"
 }
 
 cmd_down() {
-  local port
+  local port="" fetch_ok=1
 
   if master_alive; then
-    port="$(fetch_remote_port mux)" || die "failed to read the remote port file"
-    if valid_port "${port}"; then
+    if port="$(fetch_remote_port mux)"; then
+      fetch_ok=0
+    else
+      warn "failed to read the remote port file; closing the control connection"
+    fi
+    if [ "${fetch_ok}" -eq 0 ] && valid_port "${port}"; then
       cancel_forward "${port}"
+    elif [ "${fetch_ok}" -eq 0 ]; then
+      warn "remote port file has no valid port; skipping forward cancel"
+    else
+      warn "remote port unknown; an active forward may remain until the master exits"
     fi
     ssh_port_file mux 'rm -f "$port_file"' \
-      || die "failed to remove the remote port file"
+      || warn "failed to remove the remote port file"
     ssh -S "${socket}" -O exit "${server}" >/dev/null 2>&1 || true
   else
     ssh_port_file once 'rm -f "$port_file"' \
