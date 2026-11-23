@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write mihomo rules for local SSH targets from ~/.ssh/config."""
+"""Write copyable Clash directRules lines for local SSH from ~/.ssh/config."""
 
 from __future__ import annotations
 
@@ -106,7 +106,7 @@ def rule_for(host: str, port: str) -> str:
 def default_output_path() -> str:
     here = os.path.dirname(os.path.abspath(__file__))
     repo_root = os.path.dirname(here)
-    return os.path.join(repo_root, "data", "ssh-direct.yaml")
+    return os.path.join(repo_root, "data", "ssh-direct-rules.js")
 
 
 def main() -> int:
@@ -115,7 +115,7 @@ def main() -> int:
     )
     out = sys.argv[1] if len(sys.argv) > 1 else default_output_path()
     if len(sys.argv) > 2:
-        print("usage: generate_ssh_direct_rules.py [output.yaml]", file=sys.stderr)
+        print("usage: generate_ssh_direct_rules.py [output.js]", file=sys.stderr)
         return 2
     if not os.path.isfile(config_path):
         print(f"error: SSH config not found: {config_path}", file=sys.stderr)
@@ -162,9 +162,12 @@ def main() -> int:
 
     os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
     with open(out, "w", encoding="utf-8") as handle:
-        handle.write("payload:\n")
+        handle.write(
+            "// Paste into Clash Verge directRules (after loopback rules).\n"
+            "// No rule-providers / RULE-SET needed.\n"
+        )
         for item in rules:
-            handle.write(f"  - '{item}'\n")
+            handle.write(f'"{item},DIRECT",\n')
 
     print(f"wrote {len(rules)} rules to {out}", file=sys.stderr)
     return 0
