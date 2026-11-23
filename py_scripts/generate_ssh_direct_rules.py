@@ -103,10 +103,36 @@ def rule_for(host: str, port: str) -> str:
     return f"AND,((IN-TYPE,TUN),(NETWORK,TCP),{match},(DST-PORT,{port}))"
 
 
+def is_github_endpoint(host: str | None, suffix: str | None = None) -> bool:
+    """True for GitHub SSH targets that should keep using Clash proxy."""
+    if suffix and suffix.lower() == "github.com":
+        return True
+    if not host:
+        return False
+    name = host.lower().rstrip(".")
+    return name == "github.com" or name == "ssh.github.com" or name.endswith(
+        ".github.com"
+    )
+
+
 def default_output_path() -> str:
     here = os.path.dirname(os.path.abspath(__file__))
     repo_root = os.path.dirname(here)
     return os.path.join(repo_root, "data", "ssh-direct-rules.js")
+
+
+# GitHub must stay above the :22 DIRECT catch-all.
+GITHUB_PROXY_GROUP = os.environ.get("SSH_GITHUB_PROXY_GROUP", "Ghelper")
+
+GITHUB_PROXY_RULES = [
+    f"AND,((IN-TYPE,TUN),(NETWORK,TCP),(DOMAIN,github.com),(DST-PORT,22)),{GITHUB_PROXY_GROUP}",
+    f"AND,((IN-TYPE,TUN),(NETWORK,TCP),(DOMAIN,ssh.github.com),(DST-PORT,22)),{GITHUB_PROXY_GROUP}",
+    f"AND,((IN-TYPE,TUN),(NETWORK,TCP),(DOMAIN,ssh.github.com),(DST-PORT,443)),{GITHUB_PROXY_GROUP}",
+]
+
+CATCHALL_SSH22_DIRECT = (
+    "AND,((IN-TYPE,TUN),(NETWORK,TCP),(DST-PORT,22)),DIRECT"
+)
 
 
 def main() -> int:
@@ -121,7 +147,8 @@ def main() -> int:
         print(f"error: SSH config not found: {config_path}", file=sys.stderr)
         return 1
 
-    rules = ["AND,((IN-TYPE,TUN),(NETWORK,TCP),(DST-PORT,22))"]
+    rules: list[str] = list(GITHUB_PROXY_RULES)
+    rules.append(CATCHALL_SSH22_DIRECT)
     seen = set(rules)
 
     for token in host_tokens(config_path):
@@ -137,6 +164,9 @@ def main() -> int:
         ):
             print(f"skip pattern: {token}", file=sys.stderr)
             continue
+        if is_github_endpoint(token if suffix is None else None, suffix):
+            print(f"skip {token}: github", file=sys.stderr)
+            continue
         probe = token if suffix is None else f"ssh-rule-probe.{suffix}"
         try:
             host, port = endpoint_for(probe, config_path)
@@ -147,15 +177,19 @@ def main() -> int:
             err = (exc.stderr or "").strip() or str(exc)
             print(f"skip {token}: ssh -G failed: {err}", file=sys.stderr)
             continue
+        if is_github_endpoint(host, suffix):
+            print(f"skip {token}: github", file=sys.stderr)
+            continue
         if port == "22":
             continue
         if suffix and host == probe:
-            item = (
+            match = (
                 "AND,((IN-TYPE,TUN),(NETWORK,TCP),"
                 f"(DOMAIN-SUFFIX,{suffix}),(DST-PORT,{port}))"
             )
         else:
-            item = rule_for(host, port)
+            match = rule_for(host, port)
+        item = f"{match},DIRECT"
         if item not in seen:
             seen.add(item)
             rules.append(item)
@@ -163,11 +197,12 @@ def main() -> int:
     os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
     with open(out, "w", encoding="utf-8") as handle:
         handle.write(
-            "// Paste into Clash Verge directRules (after loopback rules).\n"
-            "// No rule-providers / RULE-SET needed.\n"
+            "// Paste into Clash Verge directRules (after loopback rules), in order.\n"
+            f"// GitHub lines use group {GITHUB_PROXY_GROUP!r}; keep them above the :22 DIRECT catch-all.\n"
+            "// Override group with SSH_GITHUB_PROXY_GROUP=...\n"
         )
         for item in rules:
-            handle.write(f'"{item},DIRECT",\n')
+            handle.write(f'"{item}",\n')
 
     print(f"wrote {len(rules)} rules to {out}", file=sys.stderr)
     return 0
